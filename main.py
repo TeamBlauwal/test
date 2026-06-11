@@ -305,7 +305,7 @@ async def spiele(interaction: discord.Interaction):
     await interaction.response.send_message(embed=make_embed("WM-Spiele", text))
 
 
-@bot.tree.command(name="tipp", description="Gib deinen Tipp für ein WM-Spiel ab")
+@bot.tree.command(name="tipp", description="Gib deinen Tipp für ein WM-Spiel ab - nur einmal pro Spiel!")
 async def tipp(interaction: discord.Interaction, spiel_id: str, tore_heim: int, tore_auswaerts: int):
     if tore_heim < 0 or tore_auswaerts < 0:
         await interaction.response.send_message("❌ Tore dürfen nicht negativ sein.", ephemeral=True)
@@ -329,8 +329,27 @@ async def tipp(interaction: discord.Interaction, spiel_id: str, tore_heim: int, 
         await interaction.response.send_message("❌ Für dieses Spiel kann man nicht mehr tippen.", ephemeral=True)
         return
 
+    # Schutz: Ein Tipp pro User pro Spiel. Kein Ändern möglich.
     cur.execute("""
-    INSERT OR REPLACE INTO tipps
+    SELECT tore_heim, tore_auswaerts
+    FROM tipps
+    WHERE user_id = ? AND spiel_id = ?
+    """, (interaction.user.id, spiel_id))
+
+    vorhandener_tipp = cur.fetchone()
+
+    if vorhandener_tipp:
+        alt_h, alt_a = vorhandener_tipp
+        await interaction.response.send_message(
+            f"❌ Du hast für **{heim} vs {auswaerts}** schon getippt: **{alt_h}:{alt_a}**.
+"
+            "Dieser Bot hat Schutz aktiv: Jeder Tipp zählt nur einmal und kann nicht geändert werden.",
+            ephemeral=True
+        )
+        return
+
+    cur.execute("""
+    INSERT INTO tipps
     (user_id, spiel_id, tore_heim, tore_auswaerts)
     VALUES (?, ?, ?, ?)
     """, (interaction.user.id, spiel_id, tore_heim, tore_auswaerts))
@@ -338,7 +357,9 @@ async def tipp(interaction: discord.Interaction, spiel_id: str, tore_heim: int, 
     db.commit()
 
     await interaction.response.send_message(
-        f"✅ Dein Tipp für **{heim} vs {auswaerts}** wurde gespeichert: **{tore_heim}:{tore_auswaerts}**",
+        f"✅ Dein endgültiger Tipp für **{heim} vs {auswaerts}** wurde gespeichert: **{tore_heim}:{tore_auswaerts}**.
+"
+        "⚠️ Achtung: Dieser Tipp kann nicht mehr geändert werden.",
         ephemeral=True
     )
 
@@ -467,6 +488,106 @@ async def debug_api(interaction: discord.Interaction):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Debug Fehler: `{e}`", ephemeral=True)
+
+
+def get_scoreboard_filtered(only_germany: bool = False) -> list[tuple[int, int]]:
+    if only_germany:
+        cur.execute("""
+        SELECT t.user_id, t.tore_heim, t.tore_auswaerts, s.tore_heim, s.tore_auswaerts
+        FROM tipps t
+        JOIN spiele s ON t.spiel_id = s.id
+        WHERE lower(s.heim) LIKE '%germany%' OR lower(s.auswaerts) LIKE '%germany%'
+           OR lower(s.heim) LIKE '%deutschland%' OR lower(s.auswaerts) LIKE '%deutschland%'
+        """)
+    else:
+        cur.execute("""
+        SELECT t.user_id, t.tore_heim, t.tore_auswaerts, s.tore_heim, s.tore_auswaerts
+        FROM tipps t
+        JOIN spiele s ON t.spiel_id = s.id
+        """)
+
+    scores = {}
+    for user_id, tipp_h, tipp_a, echt_h, echt_a in cur.fetchall():
+        scores[user_id] = scores.get(user_id, 0) + punkte(tipp_h, tipp_a, echt_h, echt_a)
+
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+@bot.tree.command(name="punktesystem", description="Erklärt das Punktesystem und die Wertungen")
+async def punktesystem(interaction: discord.Interaction):
+    text = (
+        "**📊 Punktesystem — Blauwals WM Geschenke**\n\n"
+        "**Exaktes Ergebnis:** 3 Punkte\n"
+        "Beispiel: Du tippst 2:1 und das Spiel endet 2:1.\n\n"
+        "**Richtige Tendenz:** 1 Punkt\n"
+        "Beispiel: Du tippst 2:0 und das Spiel endet 1:0.\n"
+        "Auch ein richtig getipptes Unentschieden, aber falsche Torzahl, gibt 1 Punkt.\n\n"
+        "**Falsch:** 0 Punkte\n"
+        "Beispiel: Du tippst Sieg Deutschland, aber Deutschland verliert.\n\n"
+        "**Schutz:** Jeder Spieler kann pro Spiel nur **einmal** tippen. "
+        "Der Tipp kann danach nicht geändert werden. Also bitte mit Bedacht tippen.\n\n"
+        "**Wertungen:**\n"
+        "1. `/rangliste` = komplette WM\n"
+        "2. `/rangliste_deutschland` = nur Deutschland-Spiele\n"
+        "3. `/gewinner` = Gewinner komplette WM\n"
+        "4. `/gewinner_deutschland` = Gewinner Deutschland-Wertung"
+    )
+    await interaction.response.send_message(embed=make_embed("Punktesystem", text))
+
+
+@bot.tree.command(name="rangliste_deutschland", description="Zeigt die Rangliste nur für Deutschland-Spiele")
+async def rangliste_deutschland(interaction: discord.Interaction):
+    top = get_scoreboard_filtered(only_germany=True)
+
+    if not top:
+        await interaction.response.send_message("Noch keine Tipps für Deutschland-Spiele vorhanden.")
+        return
+
+    text = "**🇩🇪 Deutschland-Wertung**\n\n"
+    for platz, (user_id, score) in enumerate(top[:10], start=1):
+        user = await bot.fetch_user(user_id)
+        preis = f" — Gewinn: **{PREISE[platz]}**" if platz in PREISE else ""
+        text += f"**#{platz}** {user.mention} — `{score}` Punkte{preis}\n"
+
+    await interaction.response.send_message(embed=make_embed("Rangliste Deutschland", text))
+
+
+@bot.tree.command(name="gewinner_deutschland", description="Zeigt die Top 5 Gewinner nur für Deutschland-Spiele")
+async def gewinner_deutschland(interaction: discord.Interaction):
+    top = get_scoreboard_filtered(only_germany=True)[:5]
+
+    if not top:
+        await interaction.response.send_message("Noch keine Gewinner für Deutschland-Spiele vorhanden.")
+        return
+
+    text = "**🇩🇪🎁 Gewinner Deutschland-Wertung**\n\n"
+    for platz, (user_id, score) in enumerate(top, start=1):
+        user = await bot.fetch_user(user_id)
+        text += f"**Platz {platz}:** {user.mention} — `{score}` Punkte — **{PREISE[platz]}**\n"
+
+    await interaction.response.send_message(embed=make_embed("Gewinner Deutschland", text))
+
+
+@bot.tree.command(name="gewinn_verteilen_deutschland", description="Admin: Postet die Gewinner der Deutschland-Wertung")
+async def gewinn_verteilen_deutschland(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    top = get_scoreboard_filtered(only_germany=True)[:5]
+
+    if not top:
+        await interaction.response.send_message("Noch keine Tipps für Deutschland-Spiele vorhanden.")
+        return
+
+    text = "**🇩🇪🎉 Finale Gewinner — Deutschland-Wertung 🎉**\n\n"
+    for platz, (user_id, score) in enumerate(top, start=1):
+        user = await bot.fetch_user(user_id)
+        text += f"**Platz {platz}:** {user.mention} — `{score}` Punkte — **{PREISE[platz]}**\n"
+
+    text += "\nBitte die Gewinne IC durch die Projektleitung vergeben."
+
+    await interaction.response.send_message(embed=make_embed("Gewinne Deutschland verteilen", text))
 
 
 bot.run(TOKEN)
