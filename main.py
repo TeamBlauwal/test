@@ -341,11 +341,10 @@ async def tipp(interaction: discord.Interaction, spiel_id: str, tore_heim: int, 
     if vorhandener_tipp:
         alt_h, alt_a = vorhandener_tipp
         await interaction.response.send_message(
-            f"❌ Du hast für **{heim} vs {auswaerts}** schon getippt: **{alt_h}:{alt_a}**.
-"
-            "Dieser Bot hat Schutz aktiv: Jeder Tipp zählt nur einmal und kann nicht geändert werden.",
-            ephemeral=True
-        )
+    f"❌ Du hast für **{heim} vs {auswaerts}** schon getippt: **{alt_h}:{alt_a}**.\n"
+    "Dieser Bot hat Schutz aktiv: Jeder Tipp zählt nur einmal und kann nicht geändert werden.",
+    ephemeral=True
+)
         return
 
     cur.execute("""
@@ -357,11 +356,10 @@ async def tipp(interaction: discord.Interaction, spiel_id: str, tore_heim: int, 
     db.commit()
 
     await interaction.response.send_message(
-        f"✅ Dein endgültiger Tipp für **{heim} vs {auswaerts}** wurde gespeichert: **{tore_heim}:{tore_auswaerts}**.
-"
-        "⚠️ Achtung: Dieser Tipp kann nicht mehr geändert werden.",
-        ephemeral=True
-    )
+    f"✅ Dein endgültiger Tipp für **{heim} vs {auswaerts}** wurde gespeichert: **{tore_heim}:{tore_auswaerts}**.\n"
+    "⚠️ Achtung: Dieser Tipp kann nicht mehr geändert werden.",
+    ephemeral=True
+)
 
 
 @bot.tree.command(name="meine_tipps", description="Zeigt deine abgegebenen Tipps")
