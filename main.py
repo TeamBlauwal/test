@@ -404,4 +404,49 @@ async def gewinner(interaction: discord.Interaction):
     await interaction.response.send_message(embed=make_embed("Gewinner", text))
 
 
+@bot.tree.command(name="debug_api", description="Admin: Zeigt API-Rohdaten zur Fehlersuche")
+async def debug_api(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        games_response = requests.get(WM_API_URL, timeout=20)
+        games_response.raise_for_status()
+        games_data = games_response.json()
+
+        teams_response = requests.get(TEAM_API_URL, timeout=20)
+        teams_response.raise_for_status()
+        teams_data = teams_response.json()
+
+        if isinstance(games_data, dict):
+            games = games_data.get("games") or games_data.get("data") or games_data.get("matches") or games_data.get("response") or []
+        else:
+            games = games_data
+
+        if isinstance(teams_data, dict):
+            teams = teams_data.get("teams") or teams_data.get("data") or teams_data.get("response") or []
+        else:
+            teams = teams_data
+
+        first_game = games[0] if games else {}
+        first_team = teams[0] if teams else {}
+
+        import json
+        text = "**GAME KEYS:**\n```" + str(list(first_game.keys()))[:900] + "```\n"
+        text += "**FIRST GAME:**\n```json\n" + json.dumps(first_game, ensure_ascii=False, indent=2)[:1200] + "\n```\n"
+        text += "**TEAM KEYS:**\n```" + str(list(first_team.keys()))[:900] + "```\n"
+        text += "**FIRST TEAM:**\n```json\n" + json.dumps(first_team, ensure_ascii=False, indent=2)[:1200] + "\n```"
+
+        if len(text) > 3900:
+            text = text[:3900] + "\n... gekürzt"
+
+        await interaction.followup.send(text, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Debug Fehler: `{e}`", ephemeral=True)
+
+
 bot.run(TOKEN)
