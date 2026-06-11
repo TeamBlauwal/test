@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 TOKEN = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE = os.getenv("ADMIN_ROLE", "Admin")
 WM_API_URL = os.getenv("WM_API_URL", "https://worldcup26.ir/get/games")
+TEAM_API_URL = os.getenv("TEAM_API_URL", "https://worldcup26.ir/get/teams")
 UPDATE_MINUTES = int(os.getenv("UPDATE_MINUTES", "10"))
 GUILD_ID = os.getenv("GUILD_ID", "").strip()
 
