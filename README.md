@@ -25,6 +25,7 @@ Discord Bot für das WM-Tippspiel von Bluesea Roleplay.
 DISCORD_TOKEN=dein_token
 ADMIN_ROLE=Admin
 WM_API_URL=https://worldcup26.ir/get/games
+TEAM_API_URL=https://worldcup26.ir/get/teams
 UPDATE_MINUTES=10
 
 Optional:
