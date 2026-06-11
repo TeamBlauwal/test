@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 TOKEN = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE = os.getenv("ADMIN_ROLE", "Admin")
 WM_API_URL = os.getenv("WM_API_URL", "https://worldcup26.ir/get/games")
+TEAM_API_URL = os.getenv("TEAM_API_URL", "https://worldcup26.ir/get/teams")
 UPDATE_MINUTES = int(os.getenv("UPDATE_MINUTES", "10"))
 GUILD_ID = os.getenv("GUILD_ID", "").strip()
 
@@ -105,24 +106,43 @@ def parse_score(value):
 
 
 def normalize_game(game: dict[str, Any]) -> dict[str, Any]:
+    # Diese API liefert die Teamnamen direkt in diesen Feldern:
+    # home_team_name_en und away_team_name_en
     spiel_id = str(get_field(game, ["id", "_id", "match_id", "game_id", "matchNumber"]))
 
-    heim_raw = get_field(game, ["home_team", "homeTeam", "team1", "home", "homeTeamName"])
-    aus_raw = get_field(game, ["away_team", "awayTeam", "team2", "away", "awayTeamName"])
+    heim = str(get_field(game, [
+        "home_team_name_en", "home_team_name", "homeTeamName",
+        "home_team", "homeTeam", "team1", "home"
+    ], "Unbekannt"))
 
-    heim = parse_team(heim_raw)
-    auswaerts = parse_team(aus_raw)
+    auswaerts = str(get_field(game, [
+        "away_team_name_en", "away_team_name", "awayTeamName",
+        "away_team", "awayTeam", "team2", "away"
+    ], "Unbekannt"))
 
-    status = str(get_field(game, ["status", "match_status", "state", "phase"], "scheduled"))
-    startzeit = str(get_field(game, ["date", "datetime", "start_time", "time", "kickoff"], ""))
+    finished_value = str(get_field(game, ["finished", "is_finished"], "FALSE")).upper()
+    time_elapsed = str(get_field(game, ["time_elapsed", "status", "match_status", "state", "phase"], "notstarted")).lower()
 
-    tore_heim = parse_score(get_field(game, [
-        "home_score", "homeScore", "score1", "team1_score", "goals_home", "homeGoals"
-    ]))
+    if finished_value == "TRUE":
+        status = "finished"
+    elif time_elapsed not in ("notstarted", "scheduled", "", "none", "null"):
+        status = "live"
+    else:
+        status = "scheduled"
 
-    tore_auswaerts = parse_score(get_field(game, [
-        "away_score", "awayScore", "score2", "team2_score", "goals_away", "awayGoals"
-    ]))
+    startzeit = str(get_field(game, ["local_date", "date", "datetime", "start_time", "time", "kickoff"], ""))
+
+    raw_home_score = parse_score(get_field(game, ["home_score", "homeScore", "score1", "team1_score", "goals_home", "homeGoals"]))
+    raw_away_score = parse_score(get_field(game, ["away_score", "awayScore", "score2", "team2_score", "goals_away", "awayGoals"]))
+
+    # Bei geplanten Spielen steht in der API oft 0:0, obwohl noch nicht gespielt wurde.
+    # Deshalb speichern wir Ergebnis nur bei live oder finished.
+    if status in ("live", "finished"):
+        tore_heim = raw_home_score
+        tore_auswaerts = raw_away_score
+    else:
+        tore_heim = None
+        tore_auswaerts = None
 
     return {
         "id": spiel_id,
