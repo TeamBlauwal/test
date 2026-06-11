@@ -67,6 +67,11 @@ PREISE = {
 
 
 def is_admin(member: discord.Member) -> bool:
+    # Erlaubt /update für alle mit Discord-Administratorrecht
+    # oder zusätzlich für User mit der Rolle aus ADMIN_ROLE.
+    if getattr(member.guild_permissions, "administrator", False):
+        return True
+
     return any(role.name == ADMIN_ROLE for role in getattr(member, "roles", []))
 
 
