@@ -381,22 +381,38 @@ async def debug_api(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Debug Fehler: `{e}`", ephemeral=True)
 
 
-@bot.tree.command(name="spiele", description="Zeigt die aktuellen WM-Spiele mit deutscher Uhrzeit")
-async def spiele(interaction: discord.Interaction):
+@bot.tree.command(name="spiele", description="Zeigt alle WM-Spiele mit Seiten")
+async def spiele(interaction: discord.Interaction, seite: int = 1):
+    pro_seite = 20
+
+    cur.execute("SELECT COUNT(*) FROM spiele")
+    total = cur.fetchone()[0]
+
+    if total == 0:
+        await interaction.response.send_message("Noch keine Spiele geladen. Ein Admin kann `/update` nutzen.")
+        return
+
+    max_seiten = (total + pro_seite - 1) // pro_seite
+
+    if seite < 1:
+        seite = 1
+    if seite > max_seiten:
+        seite = max_seiten
+
+    offset = (seite - 1) * pro_seite
+
     cur.execute("""
     SELECT id, heim, auswaerts, startzeit, status, tore_heim, tore_auswaerts
     FROM spiele
     ORDER BY startzeit
-    LIMIT 25
-    """)
+    LIMIT ? OFFSET ?
+    """, (pro_seite, offset))
 
     rows = cur.fetchall()
 
-    if not rows:
-        await interaction.response.send_message("Noch keine Spiele geladen. Ein Admin kann `/update` nutzen.")
-        return
+    text = f"**Seite {seite}/{max_seiten}** — Insgesamt **{total}** Spiele\n"
+    text += "Nutze `/spiele seite:2`, `/spiele seite:3` usw.\n\n"
 
-    text = ""
     for spiel_id, heim, auswaerts, startzeit, status, th, ta in rows:
         ergebnis = "offen" if th is None or ta is None else f"{th}:{ta}"
         text += f"`{spiel_id}` **{heim} vs {auswaerts}** | {ergebnis} | {status} | {berlin_datetime_text(startzeit)}\n"
@@ -733,6 +749,85 @@ async def tabelle(interaction: discord.Interaction):
         text += f"**{team}** | {row['sp']} | {row['s']} | {row['u']} | {row['n']} | **{row['pkt']}**\n"
 
     await interaction.response.send_message(embed=make_embed("Tabelle", text[:3900]))
+
+
+@bot.tree.command(name="heute", description="Zeigt WM-Spiele von heute in deutscher Zeit")
+async def heute(interaction: discord.Interaction):
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+
+    cur.execute("""
+    SELECT id, heim, auswaerts, startzeit, status, tore_heim, tore_auswaerts
+    FROM spiele
+    ORDER BY startzeit
+    """)
+
+    rows = []
+    for row in cur.fetchall():
+        dt = parse_game_datetime(row[3])
+        if dt and dt.astimezone(ZoneInfo("Europe/Berlin")).date() == today:
+            rows.append(row)
+
+    if not rows:
+        await interaction.response.send_message("Heute sind keine WM-Spiele eingetragen.")
+        return
+
+    text = ""
+    for spiel_id, heim, auswaerts, startzeit, status, th, ta in rows[:25]:
+        ergebnis = "offen" if th is None or ta is None else f"{th}:{ta}"
+        text += f"`{spiel_id}` **{heim} vs {auswaerts}** | {ergebnis} | {status} | {berlin_datetime_text(startzeit)}\n"
+
+    await interaction.response.send_message(embed=make_embed("WM-Spiele heute", text[:3900]))
+
+
+@bot.tree.command(name="morgen", description="Zeigt WM-Spiele von morgen in deutscher Zeit")
+async def morgen(interaction: discord.Interaction):
+    tomorrow = datetime.now(ZoneInfo("Europe/Berlin")).date() + timedelta(days=1)
+
+    cur.execute("""
+    SELECT id, heim, auswaerts, startzeit, status, tore_heim, tore_auswaerts
+    FROM spiele
+    ORDER BY startzeit
+    """)
+
+    rows = []
+    for row in cur.fetchall():
+        dt = parse_game_datetime(row[3])
+        if dt and dt.astimezone(ZoneInfo("Europe/Berlin")).date() == tomorrow:
+            rows.append(row)
+
+    if not rows:
+        await interaction.response.send_message("Morgen sind keine WM-Spiele eingetragen.")
+        return
+
+    text = ""
+    for spiel_id, heim, auswaerts, startzeit, status, th, ta in rows[:25]:
+        ergebnis = "offen" if th is None or ta is None else f"{th}:{ta}"
+        text += f"`{spiel_id}` **{heim} vs {auswaerts}** | {ergebnis} | {status} | {berlin_datetime_text(startzeit)}\n"
+
+    await interaction.response.send_message(embed=make_embed("WM-Spiele morgen", text[:3900]))
+
+
+@bot.tree.command(name="live", description="Zeigt aktuell laufende WM-Spiele")
+async def live(interaction: discord.Interaction):
+    cur.execute("""
+    SELECT id, heim, auswaerts, startzeit, status, tore_heim, tore_auswaerts
+    FROM spiele
+    WHERE status = 'live'
+    ORDER BY startzeit
+    """)
+
+    rows = cur.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("Aktuell läuft laut API kein WM-Spiel.")
+        return
+
+    text = ""
+    for spiel_id, heim, auswaerts, startzeit, status, th, ta in rows[:25]:
+        ergebnis = "offen" if th is None or ta is None else f"{th}:{ta}"
+        text += f"`{spiel_id}` **{heim} vs {auswaerts}** | {ergebnis} | {status} | {berlin_datetime_text(startzeit)}\n"
+
+    await interaction.response.send_message(embed=make_embed("Live-Spiele", text[:3900]))
 
 
 bot.run(TOKEN)
