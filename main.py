@@ -26,10 +26,15 @@ GUILD_ID = os.getenv("GUILD_ID", "").strip()
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN fehlt. Bitte in Railway unter Variables eintragen.")
 
+DB_PATH = os.getenv("DB_PATH", "/app/data/blauwals_wm_geschenke.db")
+DB_DIR = os.path.dirname(DB_PATH)
+if DB_DIR:
+    os.makedirs(DB_DIR, exist_ok=True)
+
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-db = sqlite3.connect("blauwals_wm_geschenke.db")
+db = sqlite3.connect(DB_PATH)
 cur = db.cursor()
 
 cur.execute("""
@@ -52,6 +57,15 @@ CREATE TABLE IF NOT EXISTS tipps (
     tore_heim INTEGER,
     tore_auswaerts INTEGER,
     PRIMARY KEY (user_id, spiel_id)
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS manuelle_punkte (
+    user_id INTEGER PRIMARY KEY,
+    punkte_gesamt INTEGER DEFAULT 0,
+    punkte_deutschland INTEGER DEFAULT 0,
+    grund TEXT DEFAULT ''
 )
 """)
 
@@ -281,6 +295,14 @@ def get_scoreboard_filtered(only_germany: bool = False) -> list[tuple[int, int]]
     scores = {}
     for user_id, tipp_h, tipp_a, echt_h, echt_a in cur.fetchall():
         scores[user_id] = scores.get(user_id, 0) + punkte(tipp_h, tipp_a, echt_h, echt_a)
+
+    if only_germany:
+        cur.execute("SELECT user_id, punkte_deutschland FROM manuelle_punkte")
+    else:
+        cur.execute("SELECT user_id, punkte_gesamt FROM manuelle_punkte")
+
+    for user_id, extra_points in cur.fetchall():
+        scores[user_id] = scores.get(user_id, 0) + int(extra_points or 0)
 
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
@@ -828,6 +850,160 @@ async def live(interaction: discord.Interaction):
         text += f"`{spiel_id}` **{heim} vs {auswaerts}** | {ergebnis} | {status} | {berlin_datetime_text(startzeit)}\n"
 
     await interaction.response.send_message(embed=make_embed("Live-Spiele", text[:3900]))
+
+
+@bot.tree.command(name="punkte_setzen", description="Admin: Setzt alte Punkte für einen Spieler wieder")
+async def punkte_setzen(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    punkte: int,
+    wertung: str = "gesamt",
+    grund: str = "alte Punkte wiederhergestellt"
+):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    wertung_clean = wertung.lower().strip()
+
+    cur.execute("""
+    INSERT OR IGNORE INTO manuelle_punkte (user_id, punkte_gesamt, punkte_deutschland, grund)
+    VALUES (?, 0, 0, ?)
+    """, (user.id, grund))
+
+    if wertung_clean in ("deutschland", "de", "germany"):
+        cur.execute("""
+        UPDATE manuelle_punkte
+        SET punkte_deutschland = ?, grund = ?
+        WHERE user_id = ?
+        """, (punkte, grund, user.id))
+        label = "Deutschland-Wertung"
+    else:
+        cur.execute("""
+        UPDATE manuelle_punkte
+        SET punkte_gesamt = ?, grund = ?
+        WHERE user_id = ?
+        """, (punkte, grund, user.id))
+        label = "Gesamt-WM-Wertung"
+
+    db.commit()
+    await interaction.response.send_message(
+        f"✅ Punkte gesetzt: {user.mention} bekommt **{punkte} Punkte** für **{label}**."
+    )
+
+
+@bot.tree.command(name="punkte_add", description="Admin: Fügt einem Spieler Punkte hinzu")
+async def punkte_add(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    punkte: int,
+    wertung: str = "gesamt",
+    grund: str = "manuelle Korrektur"
+):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    wertung_clean = wertung.lower().strip()
+
+    cur.execute("""
+    INSERT OR IGNORE INTO manuelle_punkte (user_id, punkte_gesamt, punkte_deutschland, grund)
+    VALUES (?, 0, 0, ?)
+    """, (user.id, grund))
+
+    if wertung_clean in ("deutschland", "de", "germany"):
+        cur.execute("""
+        UPDATE manuelle_punkte
+        SET punkte_deutschland = punkte_deutschland + ?, grund = ?
+        WHERE user_id = ?
+        """, (punkte, grund, user.id))
+        label = "Deutschland-Wertung"
+    else:
+        cur.execute("""
+        UPDATE manuelle_punkte
+        SET punkte_gesamt = punkte_gesamt + ?, grund = ?
+        WHERE user_id = ?
+        """, (punkte, grund, user.id))
+        label = "Gesamt-WM-Wertung"
+
+    db.commit()
+    await interaction.response.send_message(
+        f"✅ Punkte hinzugefügt: {user.mention} bekommt **+{punkte} Punkte** für **{label}**."
+    )
+
+
+@bot.tree.command(name="punkte_liste", description="Admin: Zeigt manuell gesetzte Punkte")
+async def punkte_liste(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    cur.execute("""
+    SELECT user_id, punkte_gesamt, punkte_deutschland, grund
+    FROM manuelle_punkte
+    ORDER BY punkte_gesamt DESC, punkte_deutschland DESC
+    """)
+
+    rows = cur.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("Es gibt noch keine manuell gesetzten Punkte.", ephemeral=True)
+        return
+
+    text = ""
+    for user_id, gesamt, deutschland, grund in rows[:25]:
+        user = await bot.fetch_user(user_id)
+        text += f"{user.mention} — Gesamt: **{gesamt}**, Deutschland: **{deutschland}** | {grund}\n"
+
+    await interaction.response.send_message(embed=make_embed("Manuelle Punkte", text[:3900]), ephemeral=True)
+
+
+@bot.tree.command(name="punkte_reset", description="Admin: Löscht manuelle Punkte eines Spielers")
+async def punkte_reset(interaction: discord.Interaction, user: discord.Member, wertung: str = "gesamt"):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    wertung_clean = wertung.lower().strip()
+
+    if wertung_clean in ("deutschland", "de", "germany"):
+        cur.execute("UPDATE manuelle_punkte SET punkte_deutschland = 0 WHERE user_id = ?", (user.id,))
+        label = "Deutschland-Wertung"
+    elif wertung_clean in ("alles", "all", "beide"):
+        cur.execute("DELETE FROM manuelle_punkte WHERE user_id = ?", (user.id,))
+        label = "alle manuellen Punkte"
+    else:
+        cur.execute("UPDATE manuelle_punkte SET punkte_gesamt = 0 WHERE user_id = ?", (user.id,))
+        label = "Gesamt-WM-Wertung"
+
+    db.commit()
+    await interaction.response.send_message(f"✅ Manuelle Punkte von {user.mention} wurden zurückgesetzt: **{label}**.")
+
+
+@bot.tree.command(name="db_info", description="Admin: Zeigt Datenbank-Info")
+async def db_info(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    cur.execute("SELECT COUNT(*) FROM tipps")
+    tipps_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM spiele")
+    spiele_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM manuelle_punkte")
+    manual_count = cur.fetchone()[0]
+
+    text = (
+        f"**Datenbank:** `{DB_PATH}`\n"
+        f"**Spiele:** {spiele_count}\n"
+        f"**Tipps:** {tipps_count}\n"
+        f"**Manuelle Punkte:** {manual_count}\n\n"
+        "Für Railway dauerhaft speichern: Volume mit Mount Path `/app/data` nutzen."
+    )
+
+    await interaction.response.send_message(embed=make_embed("Datenbank Info", text), ephemeral=True)
 
 
 bot.run(TOKEN)
