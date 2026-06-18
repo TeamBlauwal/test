@@ -19,6 +19,16 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 ADMIN_ROLE = os.getenv("ADMIN_ROLE", "Admin")
 WM_API_URL = os.getenv("WM_API_URL", "https://worldcup26.ir/get/games")
 TEAM_API_URL = os.getenv("TEAM_API_URL", "https://worldcup26.ir/get/teams")
+
+# Neue stabile API-Option:
+# API_PROVIDER=football-data
+# FOOTBALL_DATA_TOKEN=dein_token
+# FOOTBALL_DATA_COMPETITIONS=WC,QUFA
+API_PROVIDER = os.getenv("API_PROVIDER", "football-data").strip().lower()
+FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN", "").strip()
+FOOTBALL_DATA_COMPETITIONS = os.getenv("FOOTBALL_DATA_COMPETITIONS", "WC").strip()
+FOOTBALL_DATA_SEASON = os.getenv("FOOTBALL_DATA_SEASON", "2026").strip()
+FOOTBALL_DATA_BASE_URL = os.getenv("FOOTBALL_DATA_BASE_URL", "https://api.football-data.org/v4").strip()
 UPDATE_MINUTES = int(os.getenv("UPDATE_MINUTES", "10"))
 TIP_CLOSE_MINUTES = int(os.getenv("TIP_CLOSE_MINUTES", "5"))
 GUILD_ID = os.getenv("GUILD_ID", "").strip()
@@ -150,6 +160,108 @@ def is_before_tip_deadline(raw_value: str) -> bool:
     return now_berlin < deadline
 
 
+
+def normalize_football_data_match(match: dict[str, Any]) -> dict[str, Any]:
+    spiel_id = str(match.get("id") or match.get("_id") or "")
+
+    home_team = match.get("homeTeam") or {}
+    away_team = match.get("awayTeam") or {}
+
+    heim = (
+        home_team.get("shortName")
+        or home_team.get("name")
+        or home_team.get("tla")
+        or "Unbekannt"
+    )
+
+    auswaerts = (
+        away_team.get("shortName")
+        or away_team.get("name")
+        or away_team.get("tla")
+        or "Unbekannt"
+    )
+
+    utc_date = str(match.get("utcDate") or "")
+    status_raw = str(match.get("status") or "SCHEDULED").upper()
+
+    if status_raw in ("FINISHED", "AWARDED"):
+        status = "finished"
+    elif status_raw in ("IN_PLAY", "PAUSED", "LIVE"):
+        status = "live"
+    else:
+        status = "scheduled"
+
+    score = match.get("score") or {}
+    full_time = score.get("fullTime") or {}
+
+    home_score = parse_score(full_time.get("home"))
+    away_score = parse_score(full_time.get("away"))
+
+    if status in ("finished", "live"):
+        tore_heim = home_score
+        tore_auswaerts = away_score
+    else:
+        tore_heim = None
+        tore_auswaerts = None
+
+    return {
+        "id": f"fd_{spiel_id}",
+        "name": f"{heim} vs {auswaerts}",
+        "heim": heim,
+        "auswaerts": auswaerts,
+        "startzeit": utc_date,
+        "status": status,
+        "tore_heim": tore_heim,
+        "tore_auswaerts": tore_auswaerts
+    }
+
+
+def fetch_football_data_games() -> list[dict[str, Any]]:
+    if not FOOTBALL_DATA_TOKEN:
+        raise RuntimeError("FOOTBALL_DATA_TOKEN fehlt. Bitte kostenlosen Token bei football-data.org erstellen und in Railway Variables eintragen.")
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
+    all_games = []
+
+    competitions = [c.strip() for c in FOOTBALL_DATA_COMPETITIONS.split(",") if c.strip()]
+
+    for comp in competitions:
+        url = f"{FOOTBALL_DATA_BASE_URL}/competitions/{comp}/matches"
+        params = {}
+        if FOOTBALL_DATA_SEASON:
+            params["season"] = FOOTBALL_DATA_SEASON
+
+        response = requests.get(url, headers=headers, params=params, timeout=25)
+        response.raise_for_status()
+        data = response.json()
+
+        for match in data.get("matches", []):
+            if isinstance(match, dict):
+                game = normalize_football_data_match(match)
+                if game["id"] not in ("fd_", "", "None", "null"):
+                    all_games.append(game)
+
+    return all_games
+
+
+def fetch_old_worldcup_api_games() -> list[dict[str, Any]]:
+    response = requests.get(WM_API_URL, timeout=20)
+    response.raise_for_status()
+    data = response.json()
+
+    if isinstance(data, dict):
+        games = data.get("games") or data.get("data") or data.get("matches") or data.get("response") or data.get("results") or []
+    else:
+        games = data
+
+    normalized = []
+    for raw_game in games:
+        if not isinstance(raw_game, dict):
+            continue
+        normalized.append(normalize_game(raw_game))
+    return normalized
+
+
 def normalize_game(game: dict[str, Any]) -> dict[str, Any]:
     spiel_id = str(get_field(game, ["id", "_id", "match_id", "game_id", "matchNumber"]))
 
@@ -202,22 +314,16 @@ def normalize_game(game: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_games_from_api() -> int:
-    response = requests.get(WM_API_URL, timeout=20)
-    response.raise_for_status()
-    data = response.json()
-
-    if isinstance(data, dict):
-        games = data.get("games") or data.get("data") or data.get("matches") or data.get("response") or data.get("results") or []
+    if API_PROVIDER == "football-data":
+        games = fetch_football_data_games()
     else:
-        games = data
+        games = fetch_old_worldcup_api_games()
 
     count = 0
 
-    for raw_game in games:
-        if not isinstance(raw_game, dict):
+    for game in games:
+        if not isinstance(game, dict):
             continue
-
-        game = normalize_game(raw_game)
 
         if game["id"] in ("None", "", "null"):
             continue
@@ -384,19 +490,38 @@ async def debug_api(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        games_response = requests.get(WM_API_URL, timeout=20)
-        games_response.raise_for_status()
-        games_data = games_response.json()
+        if API_PROVIDER == "football-data":
+            if not FOOTBALL_DATA_TOKEN:
+                await interaction.followup.send("❌ FOOTBALL_DATA_TOKEN fehlt in Railway Variables.", ephemeral=True)
+                return
 
-        if isinstance(games_data, dict):
-            games = games_data.get("games") or games_data.get("data") or games_data.get("matches") or games_data.get("response") or []
+            comp = [c.strip() for c in FOOTBALL_DATA_COMPETITIONS.split(",") if c.strip()][0]
+            url = f"{FOOTBALL_DATA_BASE_URL}/competitions/{comp}/matches"
+            params = {"season": FOOTBALL_DATA_SEASON} if FOOTBALL_DATA_SEASON else {}
+            response = requests.get(url, headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, params=params, timeout=25)
+            response.raise_for_status()
+            data = response.json()
+            matches = data.get("matches", [])
+            first = matches[0] if matches else {}
+
+            text = f"**Provider:** football-data\n**Competition:** `{comp}`\n**Matches:** `{len(matches)}`\n\n"
+            text += "**MATCH KEYS:**\n```" + str(list(first.keys()))[:900] + "```\n"
+            text += "**FIRST MATCH:**\n```json\n" + json.dumps(first, ensure_ascii=False, indent=2)[:2500] + "\n```"
         else:
-            games = games_data
+            games_response = requests.get(WM_API_URL, timeout=20)
+            games_response.raise_for_status()
+            games_data = games_response.json()
 
-        first_game = games[0] if games else {}
+            if isinstance(games_data, dict):
+                games = games_data.get("games") or games_data.get("data") or games_data.get("matches") or games_data.get("response") or []
+            else:
+                games = games_data
 
-        text = "**GAME KEYS:**\n```" + str(list(first_game.keys()))[:900] + "```\n"
-        text += "**FIRST GAME:**\n```json\n" + json.dumps(first_game, ensure_ascii=False, indent=2)[:2200] + "\n```"
+            first_game = games[0] if games else {}
+
+            text = "**Provider:** old-api\n"
+            text += "**GAME KEYS:**\n```" + str(list(first_game.keys()))[:900] + "```\n"
+            text += "**FIRST GAME:**\n```json\n" + json.dumps(first_game, ensure_ascii=False, indent=2)[:2500] + "\n```"
 
         await interaction.followup.send(text[:3900], ephemeral=True)
     except Exception as e:
@@ -1004,6 +1129,25 @@ async def db_info(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=make_embed("Datenbank Info", text), ephemeral=True)
+
+
+@bot.tree.command(name="api_status", description="Admin: Zeigt welche Fußball-API genutzt wird")
+async def api_status(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Dafür brauchst du Adminrechte.", ephemeral=True)
+        return
+
+    token_status = "gesetzt" if FOOTBALL_DATA_TOKEN else "fehlt"
+    text = (
+        f"**API_PROVIDER:** `{API_PROVIDER}`\n"
+        f"**FOOTBALL_DATA_TOKEN:** `{token_status}`\n"
+        f"**FOOTBALL_DATA_COMPETITIONS:** `{FOOTBALL_DATA_COMPETITIONS}`\n"
+        f"**FOOTBALL_DATA_SEASON:** `{FOOTBALL_DATA_SEASON}`\n"
+        f"**DB_PATH:** `{DB_PATH}`\n\n"
+        "Für WM-Endrunde: `FOOTBALL_DATA_COMPETITIONS=WC`\n"
+        "Für UEFA-Quali zusätzlich testen: `FOOTBALL_DATA_COMPETITIONS=WC,QUFA`"
+    )
+    await interaction.response.send_message(embed=make_embed("API Status", text), ephemeral=True)
 
 
 bot.run(TOKEN)
